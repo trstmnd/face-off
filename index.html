@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>FACE OFF - Métiers</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#0a0a12; touch-action:none; user-select:none; -webkit-user-select:none; }
+  #game { display:block; width:100vw; height:100vh; }
+  #ui { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; z-index:10; }
+  #overlay {
+    display:none; flex-direction:column; align-items:center; gap:14px;
+    background:rgba(5,5,15,.92); padding:24px; border-radius:16px;
+    border:1px solid #333; pointer-events:auto; text-align:center; max-width:96vw;
+  }
+  #overlay h1 { color:#f5c518; font:bold 28px system-ui; letter-spacing:2px; }
+  #overlay p { color:#ccc; font:14px system-ui; line-height:1.5; }
+  #overlay button.main {
+    background:#f5c518; color:#111; border:none; font:bold 18px system-ui;
+    padding:14px 42px; border-radius:10px; cursor:pointer;
+  }
+  #cards { display:flex; gap:14px; flex-wrap:wrap; justify-content:center; }
+  .card {
+    background:#161624; border:2px solid #333; border-radius:12px;
+    padding:12px; width:150px; cursor:pointer; color:#fff; font:13px system-ui;
+    display:flex; flex-direction:column; align-items:center; gap:6px;
+  }
+  .card.selected { border-color:#f5c518; background:#22223a; }
+  .card h3 { font-size:16px; color:#f5c518; }
+  .card canvas { border-radius:8px; background:#0d0d18; }
+  .card small { color:#999; line-height:1.4; text-align:left; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="ui">
+  <div id="overlay">
+    <h1 id="ovTitle">FACE OFF</h1>
+    <p id="ovText"></p>
+    <div id="cards"></div>
+    <button class="main" id="ovBtn">COMBATTRE</button>
+  </div>
+</div>
+<script>
+'use strict';
+// ============================================================
+// FACE OFF v2 - 3 métiers iconiques : Avocat, Plombier, Médecin.
+// Chacun : physique propre, univers (arène) propre, coups propres.
+// Moteur : frames (startup/active/recovery), garde + chip damage,
+// combos chainés, barre de Rage, best of 3, IA.
+// ============================================================
+
+const cv = document.getElementById('game');
+const cx = cv.getContext('2d');
+let W = 0, H = 0, GROUND = 0, SCALE = 1;
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W; cv.height = H;
+  GROUND = H * 0.82;
+  SCALE = Math.min(W / 900, H / 500);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- RNG ----------
+function mulberry32(seed) {
+  return function() {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- Visages procéduraux ----------
+function makeFace(seed, force) {
+  const r = mulberry32(seed);
+  const skins = ['#e8b892', '#c98d63', '#8d5a3b', '#f1c9a5', '#6b4226', '#d9a06b'];
+  const hairs = ['#1c1410', '#3a2a1a', '#0f0f0f', '#5a3a20', '#7a6a55'];
+  return {
+    skin: force.skin || skins[Math.floor(r() * skins.length)],
+    hair: force.hair || hairs[Math.floor(r() * hairs.length)],
+    hairStyle: force.hairStyle !== undefined ? force.hairStyle : Math.floor(r() * 4),
+    eyeColor: ['#3a2a1a', '#2a4a3a', '#1a2a4a'][Math.floor(r() * 3)],
+    brow: 0.6 + r() * 0.8,
+    jaw: force.jaw || (0.7 + r() * 0.6),
+    noseW: 0.8 + r() * 0.5,
+    mouthW: 0.8 + r() * 0.5,
+    beard: force.beard !== undefined ? force.beard : r() < 0.4,
+    scar: r() < 0.25,
+  };
+}
+
+function drawFace(f, x, y, s, facing, hurt, acc, g) {
+  g = g || cx;
+  g.save();
+  g.translate(x, y);
+  g.scale(facing, 1);
+  g.fillStyle = f.skin;
+  g.beginPath(); g.ellipse(0, 0, s * 0.52, s * 0.62, 0, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.ellipse(s * 0.05, s * 0.32, s * 0.34 * f.jaw, s * 0.28, 0, 0, Math.PI); g.fill();
+  if (f.hairStyle !== 3 && acc !== 'cap') {
+    g.fillStyle = f.hair;
+    g.beginPath(); g.ellipse(-s * 0.02, -s * 0.28, s * 0.52, s * 0.4, 0, Math.PI, 0); g.fill();
+    if (f.hairStyle === 1) g.fillRect(-s * 0.4, -s * 0.72, s * 0.8, s * 0.12);
+  }
+  g.fillStyle = f.skin;
+  g.beginPath(); g.ellipse(-s * 0.48, s * 0.02, s * 0.08, s * 0.13, 0, 0, Math.PI * 2); g.fill();
+  // sourcils
+  g.strokeStyle = f.hair; g.lineWidth = s * 0.07 * f.brow;
+  g.beginPath(); g.moveTo(s * 0.08, -s * 0.2); g.lineTo(s * 0.34, -s * 0.16 - (hurt ? s * 0.05 : 0)); g.stroke();
+  g.beginPath(); g.moveTo(-s * 0.12, -s * 0.2); g.lineTo(-s * 0.28, -s * 0.17); g.stroke();
+  // yeux
+  const eyeY = -s * 0.06;
+  if (!hurt) {
+    g.fillStyle = '#fff';
+    g.beginPath(); g.ellipse(s * 0.2, eyeY, s * 0.09, s * 0.055, 0, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.ellipse(-s * 0.14, eyeY, s * 0.08, s * 0.05, 0, 0, Math.PI * 2); g.fill();
+    g.fillStyle = f.eyeColor;
+    g.beginPath(); g.arc(s * 0.22, eyeY, s * 0.035, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.arc(-s * 0.12, eyeY, s * 0.03, 0, Math.PI * 2); g.fill();
+    if (acc === 'glasses') {
+      g.strokeStyle = '#222'; g.lineWidth = s * 0.025;
+      g.strokeRect(s * 0.1, eyeY - s * 0.08, s * 0.24, s * 0.16);
+      g.strokeRect(-s * 0.24, eyeY - s * 0.08, s * 0.22, s * 0.16);
+      g.beginPath(); g.moveTo(s * 0.1, eyeY); g.lineTo(-s * 0.02, eyeY); g.stroke();
+    }
+  } else {
+    g.strokeStyle = '#111'; g.lineWidth = s * 0.03;
+    for (const ex of [s * 0.2, -s * 0.14]) {
+      g.beginPath(); g.moveTo(ex - s*0.05, eyeY - s*0.05); g.lineTo(ex + s*0.05, eyeY + s*0.05);
+      g.moveTo(ex + s*0.05, eyeY - s*0.05); g.lineTo(ex - s*0.05, eyeY + s*0.05); g.stroke();
+    }
+  }
+  // nez
+  g.strokeStyle = 'rgba(0,0,0,.35)'; g.lineWidth = s * 0.04;
+  g.beginPath(); g.moveTo(s * 0.16, -s * 0.02);
+  g.quadraticCurveTo(s * 0.28 * f.noseW, s * 0.12, s * 0.12, s * 0.16); g.stroke();
+  // moustache
+  if (acc === 'mustache') {
+    g.fillStyle = f.hair;
+    g.beginPath(); g.ellipse(s * 0.12, s * 0.22, s * 0.18, s * 0.06, 0, 0, Math.PI * 2); g.fill();
+  }
+  // bouche
+  g.strokeStyle = hurt ? '#7a1f1f' : '#5a2a2a'; g.lineWidth = s * 0.045;
+  g.beginPath();
+  if (hurt) g.arc(s * 0.12, s * 0.34, s * 0.1, Math.PI, 0);
+  else { g.moveTo(s * 0.02, s * 0.3); g.lineTo(s * 0.02 + s * 0.2 * f.mouthW, s * 0.29); }
+  g.stroke();
+  if (f.beard && acc !== 'mustache') {
+    g.fillStyle = f.hair + 'aa';
+    g.beginPath(); g.ellipse(s * 0.06, s * 0.42, s * 0.3 * f.jaw, s * 0.18, 0, 0, Math.PI * 2); g.fill();
+  }
+  if (f.scar) {
+    g.strokeStyle = 'rgba(120,40,40,.8)'; g.lineWidth = s * 0.03;
+    g.beginPath(); g.moveTo(s * 0.3, -s * 0.28); g.lineTo(s * 0.22, -s * 0.02); g.stroke();
+  }
+  // casquette (plombier)
+  if (acc === 'cap') {
+    g.fillStyle = '#c0392b';
+    g.beginPath(); g.ellipse(-s * 0.02, -s * 0.34, s * 0.5, s * 0.32, 0, Math.PI, 0); g.fill();
+    g.fillRect(s * 0.1, -s * 0.4, s * 0.55, s * 0.09);
+  }
+  g.restore();
+}
+
+// ---------- Roster : 3 métiers ----------
+const CHARS = {
+  avocat: {
+    label: 'MAÎTRE LEX',
+    tag: 'L\'Avocat',
+    desc: 'Grand, allonge énorme, frappe sèche. Combo Papier > Papier > Objection.',
+    seed: 101, faceForce: { hairStyle: 0, beard: false, skin: '#f1c9a5' }, acc: 'glasses',
+    phys: { h: 1.12, w: 0.9, speed: 3.0 },
+    colors: { suit: '#1a2340', pants: '#141c33', shirt: '#ffffff', gloves: '#1a2340', tie: '#8e1a1a' },
+    weapon: 'briefcase',
+    moves: {
+      jab:     { name: 'Papier',    dmg: 5,  startup: 4,  active: 3, recovery: 7,  reach: 58, hitstun: 12, rage: 6,  push: 2 },
+      cross:   { name: 'Objection', dmg: 9,  startup: 7,  active: 4, recovery: 12, reach: 68, hitstun: 16, rage: 8,  push: 4 },
+      lowkick: { name: 'Vice',      dmg: 6,  startup: 6,  active: 4, recovery: 11, reach: 62, hitstun: 14, rage: 7,  push: 3 },
+      highkick:{ name: 'Plaidoirie',dmg: 14, startup: 12, active: 5, recovery: 18, reach: 74, hitstun: 22, rage: 10, push: 7 },
+      special: { name: 'RECOURS',   dmg: 26, startup: 9,  active: 8, recovery: 26, reach: 86, hitstun: 34, rage: 0,  push: 14, needsRage: 100 },
+    },
+    combo: { jab: ['jab', 'cross', 'highkick'], cross: [], lowkick: ['cross'], highkick: [], special: [] },
+    stage: 'tribunal',
+  },
+  plombier: {
+    label: 'MARCEL',
+    tag: 'Le Plombier',
+    desc: 'Trapu, lent, mais chaque clé à molette fait très mal. Rage : le Débouchage.',
+    seed: 202, faceForce: { hairStyle: 3, beard: false, jaw: 1.2, skin: '#d9a06b' }, acc: 'cap',
+    phys: { h: 0.92, w: 1.3, speed: 2.4 },
+    colors: { suit: '#2a5aa0', pants: '#1f3f75', shirt: '#c0392b', gloves: '#8a5a2a', tie: null },
+    weapon: 'wrench',
+    moves: {
+      jab:     { name: 'Clé 12',    dmg: 7,  startup: 5,  active: 3, recovery: 9,  reach: 46, hitstun: 14, rage: 6,  push: 3 },
+      cross:   { name: 'Tuyau',     dmg: 12, startup: 9,  active: 4, recovery: 15, reach: 54, hitstun: 18, rage: 8,  push: 6 },
+      lowkick: { name: 'Fuite',     dmg: 7,  startup: 7,  active: 4, recovery: 12, reach: 48, hitstun: 15, rage: 7,  push: 3 },
+      highkick:{ name: 'Chalumeau', dmg: 16, startup: 14, active: 5, recovery: 20, reach: 56, hitstun: 24, rage: 10, push: 8 },
+      special: { name: 'DÉBOUCHAGE',dmg: 30, startup: 11, active: 8, recovery: 28, reach: 64, hitstun: 36, rage: 0,  push: 16, needsRage: 100 },
+    },
+    combo: { jab: ['jab', 'cross'], cross: [], lowkick: ['cross'], highkick: [], special: [] },
+    stage: 'cave',
+  },
+  medecin: {
+    label: 'DR VITAL',
+    tag: 'Le Médecin',
+    desc: 'Rapide, longues chaînes de piqûres, mais frappe légère. Rage : Défibrillateur.',
+    seed: 303, faceForce: { hairStyle: 2, beard: false, skin: '#c98d63' }, acc: null,
+    phys: { h: 1.0, w: 1.0, speed: 3.6 },
+    colors: { suit: '#f0f0f0', pants: '#3a8a5a', shirt: '#e8f4f0', gloves: '#7ab8d8', tie: null },
+    weapon: 'syringe',
+    moves: {
+      jab:     { name: 'Piqûre',    dmg: 4,  startup: 3,  active: 3, recovery: 6,  reach: 50, hitstun: 11, rage: 5,  push: 2 },
+      cross:   { name: 'Stétho',    dmg: 7,  startup: 6,  active: 4, recovery: 10, reach: 58, hitstun: 15, rage: 7,  push: 4 },
+      lowkick: { name: 'Scalpel',   dmg: 5,  startup: 5,  active: 4, recovery: 10, reach: 54, hitstun: 13, rage: 6,  push: 3 },
+      highkick:{ name: 'Perfusion', dmg: 11, startup: 10, active: 5, recovery: 16, reach: 64, hitstun: 20, rage: 9,  push: 6 },
+      special: { name: 'DÉFIBRILLATEUR', dmg: 22, startup: 8, active: 9, recovery: 24, reach: 74, hitstun: 32, rage: 0, push: 13, needsRage: 100 },
+    },
+    combo: { jab: ['jab', 'jab', 'cross', 'highkick'], cross: ['jab'], lowkick: ['cross', 'jab'], highkick: [], special: [] },
+    stage: 'hopital',
+  },
+};
+
+// ---------- Arene par personnage ----------
+function drawStage(kind) {
+  const g = cx.createLinearGradient(0, 0, 0, H);
+  if (kind === 'tribunal') {
+    g.addColorStop(0, '#2a1f14'); g.addColorStop(1, '#120c06');
+    cx.fillStyle = g; cx.fillRect(0, 0, W, H);
+    cx.fillStyle = '#3a2a18';
+    cx.fillRect(0, GROUND - 200 * SCALE, W, 60 * SCALE);          // banc du juge
+    cx.fillRect(W * 0.42, GROUND - 260 * SCALE, W * 0.16, 60 * SCALE);
+    cx.fillStyle = '#f5c518';
+    cx.beginPath(); cx.arc(W / 2, GROUND - 300 * SCALE, 26 * SCALE, 0, Math.PI * 2); cx.fill(); // balance
+    cx.strokeStyle = '#f5c518'; cx.lineWidth = 3 * SCALE;
+    cx.beginPath(); cx.moveTo(W / 2 - 34 * SCALE, GROUND - 300 * SCALE); cx.lineTo(W / 2 + 34 * SCALE, GROUND - 300 * SCALE); cx.stroke();
+    cx.fillStyle = '#241a0e'; cx.fillRect(0, GROUND, W, H - GROUND);
+    cx.strokeStyle = 'rgba(245,197,24,.3)';
+    cx.beginPath(); cx.moveTo(0, GROUND); cx.lineTo(W, GROUND); cx.stroke();
+  } else if (kind === 'cave') {
+    g.addColorStop(0, '#101820'); g.addColorStop(1, '#060a0e');
+    cx.fillStyle = g; cx.fillRect(0, 0, W, H);
+    cx.strokeStyle = '#2e6a4a'; cx.lineWidth = 14 * SCALE;
+    for (const yy of [0.18, 0.32]) {
+      cx.beginPath(); cx.moveTo(0, H * yy);
+      cx.lineTo(W * 0.7, H * yy); cx.quadraticCurveTo(W * 0.8, H * yy, W * 0.8, H * yy + 40 * SCALE);
+      cx.lineTo(W * 0.8, GROUND); cx.stroke();
+    }
+    cx.fillStyle = '#3a2a1a';                                    // chaudiere
+    cx.fillRect(W * 0.82, GROUND - 150 * SCALE, 90 * SCALE, 150 * SCALE);
+    cx.fillStyle = '#c0392b';
+    cx.beginPath(); cx.arc(W * 0.82 + 45 * SCALE, GROUND - 100 * SCALE, 16 * SCALE, 0, Math.PI * 2); cx.fill();
+    cx.fillStyle = '#141018'; cx.fillRect(0, GROUND, W, H - GROUND);
+    // flaque
+    cx.fillStyle = 'rgba(60,120,180,.25)';
+    cx.beginPath(); cx.ellipse(W * 0.25, GROUND + 14 * SCALE, 70 * SCALE, 8 * SCALE, 0, 0, Math.PI * 2); cx.fill();
+  } else {
+    g.addColorStop(0, '#e8f0f4'); g.addColorStop(1, '#b8c8d0');
+    cx.fillStyle = g; cx.fillRect(0, 0, W, H);
+    // ligne ECG
+    cx.strokeStyle = '#2ecc71'; cx.lineWidth = 3 * SCALE;
+    cx.beginPath();
+    const ecgY = H * 0.25, t = Date.now() / 400;
+    for (let x = 0; x <= W; x += 6) {
+      const ph = (x / (60 * SCALE) + t) % 4;
+      const y = ph < 0.3 ? ecgY - 30 * SCALE * Math.sin(ph / 0.3 * Math.PI)
+              : ph < 0.5 ? ecgY + 14 * SCALE * Math.sin((ph - 0.3) / 0.2 * Math.PI)
+              : ecgY;
+      x === 0 ? cx.moveTo(x, y) : cx.lineTo(x, y);
+    }
+    cx.stroke();
+    // croix
+    cx.fillStyle = '#c0392b';
+    cx.fillRect(W * 0.84, H * 0.12, 14 * SCALE, 46 * SCALE);
+    cx.fillRect(W * 0.84 - 16 * SCALE, H * 0.12 + 16 * SCALE, 46 * SCALE, 14 * SCALE);
+    cx.fillStyle = '#9ab0bc'; cx.fillRect(0, GROUND, W, H - GROUND);
+    cx.strokeStyle = 'rgba(255,255,255,.4)';
+    for (let x = 0; x < W; x += 60 * SCALE) {
+      cx.beginPath(); cx.moveTo(x, GROUND); cx.lineTo(x, H); cx.stroke();
+    }
+  }
+}
+
+// ---------- Arme dans la main ----------
+function drawWeapon(kind, x, y, s, angle) {
+  cx.save(); cx.translate(x, y); cx.rotate(angle);
+  if (kind === 'briefcase') {
+    cx.fillStyle = '#3a2a18';
+    cx.fillRect(-14 * s, -10 * s, 28 * s, 20 * s);
+    cx.fillStyle = '#f5c518'; cx.fillRect(-3 * s, -12 * s, 6 * s, 3 * s);
+  } else if (kind === 'wrench') {
+    cx.strokeStyle = '#9aa4ae'; cx.lineWidth = 6 * s;
+    cx.beginPath(); cx.moveTo(-12 * s, 0); cx.lineTo(14 * s, 0); cx.stroke();
+    cx.beginPath(); cx.arc(17 * s, 0, 6 * s, 0.6, Math.PI * 2 - 0.6); cx.stroke();
+  } else if (kind === 'syringe') {
+    cx.fillStyle = '#dceff8'; cx.fillRect(-12 * s, -3 * s, 22 * s, 6 * s);
+    cx.strokeStyle = '#8aa'; cx.lineWidth = 2 * s;
+    cx.beginPath(); cx.moveTo(10 * s, 0); cx.lineTo(20 * s, 0); cx.stroke();
+    cx.fillStyle = '#4a9aca'; cx.fillRect(-10 * s, -2 * s, 8 * s, 4 * s);
+  }
+  cx.restore();
+}
+
+// ---------- Fighter ----------
+class Fighter {
+  constructor(def, x, facing, seedOffset) {
+    this.def = def;
+    this.name = def.label;
+    this.face = makeFace(def.seed + (seedOffset || 0), def.faceForce);
+    this.homeX = x;
+    this.wins = 0;
+    this.reset(facing);
+  }
+  reset(facing) {
+    const d = this.def;
+    this.x = this.homeX; this.y = GROUND;
+    this.vx = 0; this.vy = 0; this.facing = facing;
+    this.hp = 100; this.rage = 0;
+    this.state = 'idle'; this.move = null; this.frame = 0;
+    this.hitstun = 0; this.blockstun = 0; this.hitTaken = false;
+    this.combo = []; this.comboTimer = 0; this.comboCount = 0;
+    this.flashTimer = 0; this.shake = 0; this.ko = false; this.animT = 0;
+  }
+  get busy() { return this.state === 'attack' || this.state === 'hit' || this.state === 'ko'; }
+  startMove(key) {
+    const m = this.def.moves[key];
+    if (!m) return false;
+    if (m.needsRage && this.rage < m.needsRage) return false;
+    if (this.state === 'attack') {
+      if (this.frame < this.moveFrames.startup) return false;
+      const last = this.combo[this.combo.length - 1];
+      if (!this.def.combo[last] || !this.def.combo[last].includes(key)) return false;
+    } else if (this.busy) return false;
+    if (m.needsRage) this.rage = 0;
+    this.state = 'attack'; this.move = key; this.frame = 0; this.hitTaken = false;
+    this.moveFrames = m;
+    this.combo.push(key); this.comboTimer = 45;
+    return true;
+  }
+  takeHit(dmg, push, hitstun, attacker) {
+    if (this.state === 'ko') return 'none';
+    if (this.state === 'block') {
+      this.hp -= Math.max(1, Math.round(dmg * 0.12));
+      this.blockstun = Math.round(hitstun * 0.6);
+      this.vx = this.facing * -push * 0.4;
+      this.rage = Math.min(100, this.rage + 4);
+      return 'block';
+    }
+    this.hp -= dmg;
+    this.hitstun = hitstun;
+    this.state = 'hit';
+    this.vx = this.facing * -push;
+    this.flashTimer = 8; this.shake = 6;
+    this.rage = Math.min(100, this.rage + Math.round(dmg * 0.9));
+    attacker.rage = Math.min(100, attacker.rage + attacker.moveFrames.rage);
+    attacker.comboCount++;
+    if (this.hp <= 0) { this.hp = 0; this.ko = true; this.state = 'ko'; this.vy = -6; }
+    return 'hit';
+  }
+  update(input, opp) {
+    this.animT++;
+    if (this.comboTimer > 0) { this.comboTimer--; if (this.comboTimer === 0) { this.combo = []; this.comboCount = 0; } }
+    if (this.flashTimer > 0) this.flashTimer--;
+    if (this.shake > 0.5) this.shake *= 0.85; else this.shake = 0;
+
+    if (this.state === 'ko') {
+      this.vy += 0.7; this.y += this.vy; this.x += this.vx; this.vx *= 0.92;
+      if (this.y >= GROUND) { this.y = GROUND; this.vy = 0; this.vx = 0; }
+      return;
+    }
+    if (this.hitstun > 0) {
+      this.hitstun--; this.x += this.vx; this.vx *= 0.85;
+      if (this.hitstun === 0) this.state = 'idle';
+      return;
+    }
+    if (this.blockstun > 0) { this.blockstun--; this.x += this.vx; this.vx *= 0.85; return; }
+    if (this.state === 'attack') {
+      const m = this.moveFrames;
+      this.frame++;
+      if (this.frame > m.startup && this.frame <= m.startup + m.active && !this.hitTaken) {
+        const hx = this.x + this.facing * (20 + m.reach * SCALE) * 0.9;
+        if (Math.abs(hx - opp.x) < 46 * SCALE && opp.state !== 'ko') {
+          const res = opp.takeHit(m.dmg, m.push, m.hitstun, this);
+          if (res !== 'none') this.hitTaken = true;
+          if (res === 'hit') spawnHitFX(opp.x, opp.y - 90 * SCALE, m.dmg, m.needsRage);
+          if (res === 'block') spawnBlockFX(opp.x + opp.facing * -20, opp.y - 80 * SCALE);
+        }
+      }
+      this.x += this.vx * 0.5; this.vx *= 0.8;
+      if (this.frame >= m.startup + m.active + m.recovery) {
+        this.state = 'idle'; this.move = null; this.frame = 0; this.combo = [];
+      }
+      return;
+    }
+    if (input.block) { this.state = 'block'; this.vx = 0; }
+    else {
+      const sp = this.def.phys.speed * SCALE;
+      this.vx = (input.right ? sp : 0) - (input.left ? sp : 0);
+      this.state = this.vx !== 0 ? 'walk' : 'idle';
+    }
+    this.x += this.vx;
+    this.facing = opp.x > this.x ? 1 : -1;
+    this.x = Math.max(30 * SCALE, Math.min(W - 30 * SCALE, this.x));
+  }
+  draw() {
+    const s = SCALE, ph = this.def.phys;
+    const f = this.facing;
+    const hurt = this.state === 'hit' || this.state === 'ko';
+    const flat = this.state === 'ko' && this.y >= GROUND - 1;
+    const c = this.def.colors;
+    cx.save();
+    if (this.flashTimer > 0 && this.flashTimer % 2 === 0) cx.globalAlpha = 0.5;
+    const bx = this.x + (this.shake ? (Math.random() - 0.5) * this.shake : 0);
+    cx.translate(bx, this.y);
+    if (flat) { cx.rotate(f * Math.PI / 2.2); cx.translate(0, -10 * s); }
+    // ombre
+    cx.fillStyle = 'rgba(0,0,0,.35)';
+    cx.beginPath(); cx.ellipse(0, 2, 42 * s * ph.w, 8 * s, 0, 0, Math.PI * 2); cx.fill();
+
+    const walk = this.state === 'walk' ? Math.sin(this.animT * 0.25) : 0;
+    const atk = this.state === 'attack';
+    const m = atk ? this.moveFrames : null;
+    const extending = atk && this.frame > m.startup && this.frame <= m.startup + m.active;
+    const guarding = this.state === 'block' || this.blockstun > 0;
+    const HGT = ph.h, WID = ph.w;
+    const hipY = -60 * HGT * s, shoulderY = -108 * HGT * s, headY = -128 * HGT * s;
+
+    // jambes
+    cx.strokeStyle = c.pants; cx.lineWidth = 16 * WID * s; cx.lineCap = 'round';
+    const kickLeg = atk && (this.move === 'lowkick' || this.move === 'highkick');
+    cx.beginPath(); cx.moveTo(-6 * WID * s * f, hipY);
+    cx.lineTo((-6 + walk * 10) * WID * s * f, hipY / 2);
+    cx.lineTo((-8 + walk * 16) * WID * s * f, 0); cx.stroke();
+    cx.beginPath(); cx.moveTo(6 * WID * s * f, hipY);
+    if (kickLeg && extending) {
+      const hy = this.move === 'highkick' ? -85 * HGT * s : -25 * HGT * s;
+      cx.lineTo(30 * WID * s * f, hy * 0.6); cx.lineTo(58 * WID * s * f, hy);
+    } else {
+      cx.lineTo((6 - walk * 10) * WID * s * f, hipY / 2);
+      cx.lineTo((8 - walk * 16) * WID * s * f, 0);
+    }
+    cx.stroke();
+    // torse (veste ou blouse)
+    cx.fillStyle = c.suit;
+    cx.beginPath();
+    cx.moveTo(-22 * WID * s * f, hipY + 2 * s);
+    cx.lineTo(22 * WID * s * f, hipY + 2 * s);
+    cx.lineTo(17 * WID * s * f, shoulderY);
+    cx.lineTo(-17 * WID * s * f, shoulderY);
+    cx.closePath(); cx.fill();
+    // chemise + cravate (avocat)
+    cx.fillStyle = c.shirt;
+    cx.beginPath();
+    cx.moveTo(-4 * s * f, shoulderY); cx.lineTo(8 * s * f, shoulderY);
+    cx.lineTo(4 * s * f, hipY); cx.lineTo(0, hipY);
+    cx.closePath(); cx.fill();
+    if (c.tie) {
+      cx.fillStyle = c.tie;
+      cx.beginPath(); cx.moveTo(1 * s * f, shoulderY + 4 * s); cx.lineTo(5 * s * f, shoulderY + 4 * s);
+      cx.lineTo(3 * s * f, hipY - 8 * s); cx.closePath(); cx.fill();
+    }
+    if (this.def.key === 'medecin' || this.def.weapon === 'syringe') {
+      // stethoscope
+      cx.strokeStyle = '#2c3e50'; cx.lineWidth = 3 * s;
+      cx.beginPath(); cx.arc(0, shoulderY + 20 * s, 12 * s, 0.3, Math.PI - 0.3); cx.stroke();
+      cx.fillStyle = '#95a5a6';
+      cx.beginPath(); cx.arc(11 * s, shoulderY + 26 * s, 4 * s, 0, Math.PI * 2); cx.fill();
+    }
+    // bras peau (medecin) ou manche
+    cx.strokeStyle = this.def.key === 'avocat' || this.def.key === 'plombier' ? c.suit : '#d9b08a';
+    cx.lineWidth = 12 * WID * s;
+    const punch = atk && (this.move === 'jab' || this.move === 'cross' || this.move === 'special');
+    // bras arriere
+    cx.beginPath(); cx.moveTo(-12 * WID * s * f, shoulderY + 8 * s);
+    if (guarding) { cx.lineTo(-2 * s * f, shoulderY + 12 * s); cx.lineTo(6 * s * f, shoulderY); }
+    else { cx.lineTo(-22 * WID * s * f, shoulderY + 24 * s); cx.lineTo(-16 * WID * s * f, shoulderY + 12 * s); }
+    cx.stroke();
+    // bras avant
+    cx.beginPath(); cx.moveTo(10 * WID * s * f, shoulderY + 8 * s);
+    if (punch && extending) {
+      const r = this.move === 'special' ? 70 * s : (this.move === 'cross' ? 55 * s : 45 * s);
+      const ry = shoulderY + 5 * s;
+      cx.lineTo(25 * WID * s * f, ry + 2 * s); cx.lineTo(r * f, ry);
+      cx.stroke();
+      cx.fillStyle = c.gloves;
+      cx.beginPath(); cx.arc(r * f, ry, 9 * s, 0, Math.PI * 2); cx.fill();
+      drawWeapon(this.def.weapon, r * f + 8 * s * f, ry, s, this.move === 'special' ? f * -0.4 : 0);
+      if (this.move === 'special') {
+        cx.strokeStyle = '#f5c518'; cx.lineWidth = 3 * s;
+        cx.beginPath(); cx.arc(r * f, ry, 17 * s, 0, Math.PI * 2); cx.stroke();
+      }
+    } else if (guarding) {
+      cx.lineTo(14 * WID * s * f, shoulderY + 12 * s); cx.lineTo(8 * WID * s * f, shoulderY - 4 * s);
+      cx.stroke();
+      cx.fillStyle = c.gloves;
+      cx.beginPath(); cx.arc(8 * WID * s * f, shoulderY - 4 * s, 8 * s, 0, Math.PI * 2); cx.fill();
+    } else {
+      cx.lineTo(20 * WID * s * f, shoulderY + 26 * s); cx.lineTo(14 * WID * s * f, shoulderY + 12 * s);
+      cx.stroke();
+      cx.fillStyle = c.gloves;
+      cx.beginPath(); cx.arc(14 * WID * s * f, shoulderY + 12 * s, 8 * s, 0, Math.PI * 2); cx.fill();
+      drawWeapon(this.def.weapon, 14 * WID * s * f + 6 * s * f, shoulderY + 12 * s, s * 0.8, 0);
+    }
+    // tete
+    const bob = guarding ? 4 * s : (hurt ? -6 * s : Math.sin(this.animT * 0.1) * 1.5 * s);
+    drawFace(this.face, bob * 0.4, headY + bob, 44 * s, f, hurt, this.def.acc);
+    cx.restore();
+  }
+}
+
+// ---------- FX ----------
+const fx = [];
+function spawnHitFX(x, y, dmg, big) {
+  fx.push({ t: 0, life: 16, x, y, kind: 'hit', dmg, big });
+  for (let i = 0; i < (big ? 16 : 8); i++) fx.push({
+    t: 0, life: 18, x, y, kind: 'spark',
+    vx: (Math.random() - 0.5) * (big ? 14 : 9), vy: (Math.random() - 0.8) * (big ? 14 : 9)
+  });
+}
+function spawnBlockFX(x, y) { fx.push({ t: 0, life: 12, x, y, kind: 'block' }); }
+function updateFX() {
+  for (let i = fx.length - 1; i >= 0; i--) {
+    const e = fx[i]; e.t++;
+    if (e.kind === 'spark') { e.x += e.vx; e.y += e.vy; e.vy += 0.4; }
+    if (e.t >= e.life) fx.splice(i, 1);
+  }
+}
+function drawFX() {
+  for (const e of fx) {
+    const p = 1 - e.t / e.life;
+    if (e.kind === 'hit') {
+      cx.fillStyle = e.big ? `rgba(255,80,0,${p})` : `rgba(255,${Math.round(180 * p)},0,${p})`;
+      cx.font = `bold ${(e.big ? 30 : 22) * SCALE}px system-ui`;
+      cx.textAlign = 'center';
+      cx.fillText('-' + e.dmg, e.x, e.y - e.t * 1.6);
+    } else if (e.kind === 'spark') {
+      cx.fillStyle = `rgba(255,220,80,${p})`;
+      cx.beginPath(); cx.arc(e.x, e.y, 3 * SCALE * p + 1, 0, Math.PI * 2); cx.fill();
+    } else if (e.kind === 'block') {
+      cx.strokeStyle = `rgba(120,200,255,${p})`; cx.lineWidth = 3 * SCALE;
+      cx.beginPath(); cx.arc(e.x, e.y, (1 - p) * 30 * SCALE + 8, 0, Math.PI * 2); cx.stroke();
+    }
+  }
+}
+
+// ---------- HUD ----------
+function drawHUD() {
+  const pad = 12, bw = W * 0.36, bh = 16;
+  for (const [fig, side] of [[p1, 0], [p2, 1]]) {
+    const x = side === 0 ? pad : W - pad - bw;
+    cx.fillStyle = 'rgba(0,0,0,.55)'; cx.fillRect(x, pad, bw, bh);
+    const hpw = bw * fig.hp / 100;
+    cx.fillStyle = fig.hp > 30 ? '#2ecc40' : '#e74c3c';
+    if (side === 0) cx.fillRect(x, pad, hpw, bh);
+    else cx.fillRect(x + bw - hpw, pad, hpw, bh);
+    cx.strokeStyle = '#f5c518'; cx.lineWidth = 1.5; cx.strokeRect(x, pad, bw, bh);
+    cx.fillStyle = 'rgba(0,0,0,.55)'; cx.fillRect(x, pad + bh + 4, bw, 7);
+    cx.fillStyle = fig.rage >= 100 ? '#f5c518' : '#7a5cc8';
+    const rw = bw * fig.rage / 100;
+    if (side === 0) cx.fillRect(x, pad + bh + 4, rw, 7);
+    else cx.fillRect(x + bw - rw, pad + bh + 4, rw, 7);
+    if (fig.rage >= 100) {
+      cx.fillStyle = '#f5c518'; cx.font = `bold ${11 * Math.max(1, SCALE)}px system-ui`;
+      cx.textAlign = side === 0 ? 'left' : 'right';
+      cx.fillText('RAGE PRÊT', side === 0 ? x : x + bw, pad + bh + 24);
+    }
+    cx.fillStyle = '#fff'; cx.font = `bold ${12 * Math.max(1, SCALE)}px system-ui`;
+    cx.textAlign = side === 0 ? 'left' : 'right';
+    cx.fillText(fig.def.tag + ' - ' + fig.name, side === 0 ? x : x + bw, pad + bh + 40);
+    for (let i = 0; i < fig.wins; i++) {
+      cx.fillStyle = '#f5c518';
+      cx.beginPath();
+      cx.arc((side === 0 ? x + bw - 12 - i * 20 : x + 12 + i * 20), pad + bh / 2, 5, 0, Math.PI * 2);
+      cx.fill();
+    }
+  }
+  cx.fillStyle = '#f5c518'; cx.font = `bold ${26 * Math.max(1, SCALE)}px system-ui`;
+  cx.textAlign = 'center';
+  cx.fillText(Math.ceil(roundTimer / 60), W / 2, pad + 26);
+  for (const [fig, side] of [[p1, 0], [p2, 1]]) {
+    if (fig.comboCount >= 2) {
+      cx.fillStyle = '#f5c518'; cx.font = `bold ${20 * SCALE}px system-ui`;
+      cx.textAlign = side === 0 ? 'left' : 'right';
+      cx.fillText(fig.comboCount + ' HITS!', side === 0 ? W * 0.08 : W * 0.92, H * 0.3);
+    }
+  }
+}
+
+// ---------- Controls ----------
+const touches = {};
+const keys = { left: false, right: false, block: false };
+const btnDefs = [
+  { id: 'jab',      label: '1', color: '#2ecc40', r: 30 },
+  { id: 'cross',    label: '2', color: '#3498db', r: 30 },
+  { id: 'lowkick',  label: '3', color: '#e67e22', r: 26 },
+  { id: 'highkick', label: '4', color: '#e74c3c', r: 26 },
+  { id: 'special',  label: 'RAGE', color: '#f5c518', r: 34 },
+];
+function layoutButtons() {
+  const s = SCALE;
+  const padX = W - 50 * s, baseY = H - 60 * s;
+  btnDefs[0].x = padX - 70 * s;  btnDefs[0].y = baseY - 34 * s;
+  btnDefs[1].x = padX - 6 * s;   btnDefs[1].y = baseY - 78 * s;
+  btnDefs[2].x = padX - 128 * s; btnDefs[2].y = baseY + 14 * s;
+  btnDefs[3].x = padX - 40 * s;  btnDefs[3].y = baseY + 30 * s;
+  btnDefs[4].x = padX + 52 * s;  btnDefs[4].y = baseY - 128 * s;
+  for (const b of btnDefs) b.r = b.r * s;
+  keys.blockBtn = { x: W - 190 * s, y: H - 130 * s, r: 26 * s };
+}
+function drawControls() {
+  layoutButtons();
+  const s = SCALE;
+  const jx = 80 * s, jy = H - 70 * s, jr = 44 * s;
+  cx.strokeStyle = 'rgba(255,255,255,.25)'; cx.lineWidth = 2;
+  cx.beginPath(); cx.arc(jx, jy, jr, 0, Math.PI * 2); cx.stroke();
+  let nx = jx, ny = jy;
+  if (touches.joy) {
+    const dx = touches.joy.x - jx, dy = touches.joy.y - jy;
+    const d = Math.min(jr * 0.7, Math.hypot(dx, dy)), a = Math.atan2(dy, dx);
+    nx = jx + Math.cos(a) * d; ny = jy + Math.sin(a) * d;
+  }
+  cx.fillStyle = 'rgba(255,255,255,.35)';
+  cx.beginPath(); cx.arc(nx, ny, jr * 0.45, 0, Math.PI * 2); cx.fill();
+  touches.joyCenter = { x: jx, y: jy, r: jr };
+  const moveNames = p1 ? p1.def.moves : CHARS.avocat.moves;
+  for (const b of btnDefs) {
+    const dim = b.id === 'special' && p1 && p1.rage < 100;
+    cx.globalAlpha = b.pressed ? 1 : (dim ? 0.25 : 0.75);
+    cx.fillStyle = b.color;
+    cx.beginPath(); cx.arc(b.x, b.y, b.r, 0, Math.PI * 2); cx.fill();
+    cx.globalAlpha = 1;
+    cx.fillStyle = '#111'; cx.font = `bold ${9 * Math.max(1, s)}px system-ui`;
+    cx.textAlign = 'center'; cx.textBaseline = 'middle';
+    const nm = moveNames[b.id] ? moveNames[b.id].name : b.label;
+    cx.fillText(b.id === 'special' ? nm : nm.slice(0, 9), b.x, b.y - 5 * s);
+    cx.font = `bold ${8 * Math.max(1, s)}px system-ui`;
+    cx.fillText(b.label, b.x, b.y + 7 * s);
+    cx.textBaseline = 'alphabetic';
+  }
+  const gb = keys.blockBtn;
+  cx.globalAlpha = keys.block ? 1 : 0.6;
+  cx.fillStyle = '#7a5cc8';
+  cx.beginPath(); cx.arc(gb.x, gb.y, gb.r, 0, Math.PI * 2); cx.fill();
+  cx.globalAlpha = 1;
+  cx.fillStyle = '#fff'; cx.font = `bold ${11 * Math.max(1, s)}px system-ui`;
+  cx.textAlign = 'center';
+  cx.fillText('GARDE', gb.x, gb.y + 4 * s);
+}
+
+const queue = [];
+function handleTouchStart(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const p = { x: t.clientX, y: t.clientY };
+    const jc = touches.joyCenter;
+    if (jc && Math.hypot(p.x - jc.x, p.y - jc.y) < jc.r * 1.6) {
+      touches.joy = { x: p.x, y: p.y, id: t.identifier };
+      continue;
+    }
+    let hit = false;
+    for (const b of btnDefs) {
+      if (Math.hypot(p.x - b.x, p.y - b.y) < b.r * 1.35) { queue.push(b.id); b.pressed = 4; hit = true; break; }
+    }
+    if (!hit && keys.blockBtn && Math.hypot(p.x - keys.blockBtn.x, p.y - keys.blockBtn.y) < keys.blockBtn.r * 1.4) {
+      keys.block = true; touches.blockId = t.identifier; hit = true;
+    }
+  }
+}
+function handleTouchMove(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (touches.joy && touches.joy.id === t.identifier) {
+      const jc = touches.joyCenter;
+      touches.joy.x = t.clientX; touches.joy.y = t.clientY;
+      const dx = t.clientX - jc.x;
+      keys.left = dx < -jc.r * 0.3; keys.right = dx > jc.r * 0.3;
+    }
+  }
+}
+function handleTouchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (touches.joy && touches.joy.id === t.identifier) { touches.joy = null; keys.left = false; keys.right = false; }
+    if (touches.blockId === t.identifier) { keys.block = false; touches.blockId = null; }
+  }
+}
+cv.addEventListener('touchstart', handleTouchStart, { passive: false });
+cv.addEventListener('touchmove', handleTouchMove, { passive: false });
+cv.addEventListener('touchend', handleTouchEnd, { passive: false });
+cv.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+window.addEventListener('keydown', e => {
+  const m = { ArrowLeft: 'left', ArrowRight: 'right', a: 'left', d: 'right', q: 'left',
+    s: 'block', ArrowDown: 'block', j: 'jab', k: 'cross', u: 'lowkick', i: 'highkick', l: 'special' }[e.key];
+  if (!m) return;
+  if (m === 'block') keys.block = true;
+  else if (m === 'left') keys.left = true;
+  else if (m === 'right') keys.right = true;
+  else queue.push(m);
+});
+window.addEventListener('keyup', e => {
+  const m = { ArrowLeft: 'left', ArrowRight: 'right', a: 'left', d: 'right', q: 'left', s: 'block', ArrowDown: 'block' }[e.key];
+  if (m === 'block') keys.block = false;
+  if (m === 'left') keys.left = false;
+  if (m === 'right') keys.right = false;
+});
+
+// ---------- IA ----------
+const ai = {};
+function aiInput(self, opp) {
+  const inp = { left: false, right: false, block: false, attack: null };
+  if (self.state === 'ko' || paused) return inp;
+  const dist = Math.abs(opp.x - self.x);
+  const dir = opp.x > self.x ? 1 : -1;
+  ai.think = (ai.think || 0) - 1;
+  if (ai.think <= 0) {
+    ai.think = 8 + Math.floor(Math.random() * 14);
+    const r = Math.random();
+    const lowHp = self.hp < 35;
+    if (dist > 130 * SCALE) ai.mode = 'approach';
+    else if (opp.state === 'attack' && r < (lowHp ? 0.75 : 0.5)) ai.mode = 'block';
+    else if (self.rage >= 100 && dist < 110 * SCALE && r < 0.6) ai.mode = 'special';
+    else if (dist < 100 * SCALE) ai.mode = r < 0.6 ? 'attack' : (r < 0.8 ? 'retreat' : 'block');
+    else ai.mode = r < 0.7 ? 'approach' : 'idle';
+    if (ai.mode === 'attack') {
+      const normals = ['jab', 'jab', 'cross', 'lowkick', 'highkick'];
+      ai.pick = normals[Math.floor(Math.random() * normals.length)];
+    }
+  }
+  switch (ai.mode) {
+    case 'approach': if (dir > 0) inp.right = true; else inp.left = true; break;
+    case 'retreat': if (dir > 0) inp.left = true; else inp.right = true; break;
+    case 'block': inp.block = true; break;
+    case 'attack': if (dist < 115 * SCALE) inp.attack = ai.pick; break;
+    case 'special': inp.attack = 'special'; break;
+  }
+  return inp;
+}
+
+// ---------- Match ----------
+let p1 = null, p2 = null;
+let roundTimer = 60 * 60;
+let phase = 'menu', phaseT = 0;
+let paused = true;
+let announce = '', announceT = 0;
+let selected = 'avocat';
+
+const ov = document.getElementById('overlay');
+const ovTitle = document.getElementById('ovTitle');
+const ovText = document.getElementById('ovText');
+const ovBtn = document.getElementById('ovBtn');
+const cardsEl = document.getElementById('cards');
+
+function buildCards() {
+  cardsEl.innerHTML = '';
+  for (const key of Object.keys(CHARS)) {
+    const d = CHARS[key]; d.key = key;
+    const card = document.createElement('div');
+    card.className = 'card' + (key === selected ? ' selected' : '');
+    const cvs = document.createElement('canvas');
+    cvs.width = 120; cvs.height = 120;
+    card.appendChild(cvs);
+    const h3 = document.createElement('h3'); h3.textContent = d.tag;
+    const nm = document.createElement('div'); nm.style.color = '#fff'; nm.textContent = d.label;
+    const sm = document.createElement('small'); sm.textContent = d.desc;
+    card.append(h3, nm, sm);
+    card.addEventListener('click', () => {
+      selected = key;
+      document.querySelectorAll('.card').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+    });
+    cardsEl.appendChild(card);
+    // portrait
+    const pc = cvs.getContext('2d');
+    drawPortrait(pc, makeFace(d.seed, d.faceForce), d);
+  }
+}
+function drawPortrait(pc, face, d) {
+  pc.fillStyle = '#0d0d18'; pc.fillRect(0, 0, 120, 120);
+  const tint = d.stage === 'tribunal' ? '#2a1f14' : d.stage === 'cave' ? '#101820' : '#e8f0f4';
+  pc.fillStyle = tint; pc.globalAlpha = 0.4; pc.fillRect(0, 0, 120, 120); pc.globalAlpha = 1;
+  drawFace(face, 60, 66, 52, 1, false, d.acc, pc);
+}
+
+function showSelect() {
+  ovTitle.textContent = 'CHOISIS TON MÉTIER';
+  ovText.innerHTML = 'Best of 3. Garde pour encaisser (chip), combo selon le perso, Rage à 100 %.<br><small>Tactile : joystick gauche, boutons droite. Clavier : flèches/QSD, J K U I L.</small>';
+  ovBtn.textContent = 'COMBATTRE';
+  buildCards();
+  ov.style.display = 'flex';
+  paused = true;
+  phase = 'select';
+}
+
+function startMatch() {
+  const defP = CHARS[selected];
+  const others = Object.keys(CHARS).filter(k => k !== selected);
+  const oppKey = others[Math.floor(Math.random() * others.length)];
+  const defO = CHARS[oppKey];
+  p1 = new Fighter(defP, W * 0.3, 1, 0);
+  p2 = new Fighter(defO, W * 0.7, -1, 5000);
+  p1.def.key = selected; p2.def.key = oppKey;
+  p1.wins = 0; p2.wins = 0;
+  startRound();
+}
+function startRound() {
+  p1.reset(1); p2.reset(-1);
+  p1.homeX = W * 0.3; p2.homeX = W * 0.7;
+  p1.x = p1.homeX; p2.x = p2.homeX;
+  roundTimer = 60 * 60;
+  fx.length = 0;
+  announce = 'ROUND ' + (p1.wins + p2.wins + 1); announceT = 90;
+  phase = 'intro'; phaseT = 90;
+  paused = false;
+  ov.style.display = 'none';
+}
+function endRound(winner) {
+  phase = 'roundEnd'; phaseT = 130;
+  if (winner) { winner.wins++; announce = winner.name + ' GAGNE'; }
+  else announce = 'ÉGALITÉ';
+  announceT = 130;
+}
+
+ovBtn.addEventListener('click', () => {
+  if (phase === 'select') startMatch();
+  else if (phase === 'matchEnd') showSelect();
+});
+
+// ---------- Boucle ----------
+function tick() {
+  requestAnimationFrame(tick);
+  if (paused) return;
+
+  if (phase === 'intro') {
+    phaseT--;
+    if (phaseT === 30) { announce = 'FIGHT!'; announceT = 40; }
+    if (phaseT <= 0) phase = 'fight';
+  }
+  if (phase === 'fight') {
+    const in1 = { left: keys.left, right: keys.right, block: keys.block };
+    while (queue.length) p1.startMove(queue.shift());
+    const in2 = aiInput(p2, p1);
+    if (in2.attack) p2.startMove(in2.attack);
+    p1.update(in1, p2);
+    p2.update(in2, p1);
+    roundTimer--;
+    if (p1.ko && p2.ko) endRound(null);
+    else if (p1.ko) endRound(p2);
+    else if (p2.ko) endRound(p1);
+    else if (roundTimer <= 0) endRound(p1.hp > p2.hp ? p1 : p2.hp > p1.hp ? p2 : null);
+  }
+  if (phase === 'roundEnd') {
+    p1.update({ left: false, right: false, block: false }, p2);
+    p2.update({ left: false, right: false, block: false }, p1);
+    phaseT--;
+    if (phaseT <= 0) {
+      if (p1.wins >= 2 || p2.wins >= 2) {
+        phase = 'matchEnd'; paused = true;
+        const champ = p1.wins >= 2 ? p1 : p2;
+        ovTitle.textContent = champ.def.tag.toUpperCase() + ' CHAMPION';
+        ovText.innerHTML = champ.name + ' gagne ' + p1.wins + ' - ' + p2.wins;
+        ovBtn.textContent = 'REJOUER';
+        cardsEl.innerHTML = '';
+        ov.style.display = 'flex';
+      } else startRound();
+    }
+  }
+
+  for (const b of btnDefs) if (b.pressed) b.pressed--;
+  updateFX();
+
+  drawStage(p1 ? p1.def.stage : 'tribunal');
+  if (p1) {
+    // ordre de dessin : celui derriere d'abord
+    const order = p1.x <= p2.x ? [p1, p2] : [p2, p1];
+    order[0].draw(); order[1].draw();
+  }
+  drawFX();
+  if (p1) { drawHUD(); drawControls(); }
+  if (announceT > 0) {
+    announceT--;
+    cx.globalAlpha = Math.min(1, announceT / 20);
+    cx.fillStyle = '#f5c518';
+    cx.font = `bold ${44 * Math.max(1, SCALE)}px system-ui`;
+    cx.textAlign = 'center';
+    cx.fillText(announce, W / 2, H * 0.35);
+    cx.globalAlpha = 1;
+  }
+}
+showSelect();
+tick();
+</script>
+</body>
+</html>
